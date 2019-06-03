@@ -10,6 +10,8 @@
 
 const int size = 16;
 const int bits = 4;
+const int blocksize = 64;
+
 __global__ void joinGroups(unsigned tab1[], unsigned out[], unsigned N) {
 	extern __shared__ int tab[];
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -30,7 +32,7 @@ __global__ void joinGroups(unsigned tab1[], unsigned out[], unsigned N) {
 		}
 		if (idx > 0) {
 			unsigned dif = a ^ b;
-			printf("%d %x %x %x\n", idx, a, b, dif);
+			//printf("%d %x %x %x\n", idx, a, b, dif);
 			if (__popc(dif) == 2 && dif > a && dif > b) {
 				out[idx] = 0;
 			}
@@ -41,11 +43,48 @@ __global__ void joinGroups(unsigned tab1[], unsigned out[], unsigned N) {
 	}
 }
 
+__global__ void countCombination(unsigned sizes[], unsigned sizes_size, unsigned combinations[]) {
+	int idx = blockDim.x * blockIdx.x + threadIdx.x;
+	if (idx < sizes_size) {
+		unsigned tmp = sizes[idx];
+		tmp = tmp * (tmp - 1) / 2;
+		combinations[idx] = tmp;
+	}
+}
 struct isPositive {
 	__host__ __device__ bool operator()(int x) {
 		return x > 0;
 	}
 };
+
+
+int forGroups(thrust::device_vector<unsigned> Jt, thrust::device_vector<unsigned> G, thrust::device_vector<unsigned> I, unsigned size) {
+	thrust::device_vector<unsigned> A(size);
+	thrust::exclusive_scan(Jt.begin(), Jt.end(), A.begin());
+	int nt = A[size - 1] + Jt[size - 1];
+	G.clear();G.resize(nt);
+	I.clear();I.resize(nt);
+	joinGroups << <(size + blocksize - 1) / blocksize, blocksize >> >( A.data().get(), Jt.data().get(), G.data().get(), I.data().get(), size);
+	thrust::inclusive_scan(G.begin(), G.end(), G.begin());
+	thrust::inclusive_scan(I.begin(), I.end(), I.begin(), thrust::max<unsigned>);
+	return nt;
+}
+
+__global__ void initGI(unsigned A[], unsigned Jt[], unsigned G[], unsigned I[], unsigned size) {
+	int idx = blockDim.x * blockIdx.x + threadIdx.x;
+	if (idx < size) {
+		atomicAdd(&G[A[idx]], 1);
+		if (Jt[idx] != 0)
+			I[A[idx]] = A[idx];
+	}
+}
+
+__global__ void finalGI(unsigned G[], unsigned I[], unsigned size) {
+	int idx = blockDim.x * blockIdx.x + threadIdx.x;
+	if (idx < size) {
+		G[idx] = G[idx] - 1;
+		I[idx] = idx - I[idx];
+	}
 
 int main()
 {
@@ -93,7 +132,7 @@ int main()
 		printf("%x\n", h_tab1[i]);
 	}
 		printf("\n\n");
-	joinGroups << <(size +63)/ 64, 64, size*sizeof(int) >> > (d_tab1.data().get(), d_tab2.data().get(), size);
+	joinGroups << <(size + blocksize - 1)/ blocksize, blocksize, size*sizeof(int) >> > (d_tab1.data().get(), d_tab2.data().get(), size);
 	h_tab1 = d_tab2;
 	for (int i = 0;i < size;i++) {
 		printf("%d;", h_tab1[i]);
@@ -108,21 +147,19 @@ int main()
 	printf("\n\n");
 	d_tab4.resize(size);
 	auto x = thrust::reduce_by_key(d_tab3.begin(), d_tab3.end(), thrust::make_constant_iterator(1), d_tab2.begin(), d_tab4.begin());
+	int sizes_size = x.second - d_tab4.begin();
+	h_tab1 = d_tab4;
+	for (int i = 0;i < sizes_size;i++) {
+		printf("%d:%d\n", h_tab1[i], sizes[i]);
+	}
+	printf("\n\n");
+	
+	countCombination << < (sizes_size + blocksize - 1) / blocksize, blocksize >> > (d_tab4.data().get(), sizes_size, d_tab2.data().get());
 	h_tab1 = d_tab2;
-	for (int i = 0;i < x.first-d_tab2.begin();i++) {
+	for (int i = 0;i < sizes_size;i++) {
 		printf("%d;", h_tab1[i]);
 	}
 	printf("\n\n");
-	h_tab1 = d_tab4;
-	for (int i = 0;i < x.second - d_tab2.begin();i++) {
-		printf("%d:%d;", h_tab1[i], sizes[i]);
-	}
-
-
-	printf("\n\n");
-
-	printf("%f", (h_tab1[size / 2] + h_tab1[size / 2 + 1]) / 2.0);
-
 	return 0;
 }
 
